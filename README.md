@@ -53,6 +53,21 @@ The scope is intentionally narrow. The depth is intentionally real.
 ```
 
 ---
+## Quick Proof of Correctness
+
+This system guarantees correctness through deterministic processing, contract enforcement, and idempotent state updates.
+
+**Core Proof Points:**
+
+- **Contract-first validation:** All incoming events are validated against schema and domain rules (R010–R120). Invalid events are rejected before processing.
+- **Deterministic streaming:** Micro-batch execution with checkpointing ensures consistent state recovery and replay safety.
+- **Duplicate protection:** Watermark-based deduplication prevents double counting from late or repeated events.
+- **Idempotent metrics:** Delta Lake MERGE operations ensure aggregates update safely without overwrite risks.
+- **Auditability:** Run logs and evidence notebooks allow independent verification of processing outcomes.
+
+This project includes a dedicated **Evidence Notebook** demonstrating validation results, metric consistency checks, and run-level audit proof.
+
+---
 
 ## What Is Implemented
 
