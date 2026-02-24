@@ -51,7 +51,7 @@ The scope is intentionally narrow. The depth is intentionally real.
                                     │  Watermark + dedup state │
                                     └─────────────────────────┘
 ```
-
+![Architecture](docs/architecture.png)
 ---
 ## Quick Proof of Correctness
 
