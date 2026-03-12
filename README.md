@@ -1,6 +1,6 @@
 # Azure Event Stream — Real-Time Financial Metrics Pipeline
 
-A production-grade streaming pipeline built on Azure Event Hubs, Spark Structured Streaming, and Delta Lake. Ingests synthetic financial transaction events in real time, validates them against a strict data contract, deduplicates across batches, and publishes three incremental metrics to Delta tables every 30 seconds.
+A production-grade streaming pipeline built on Azure Event Hubs, Spark Structured Streaming, and Delta Lake. It ingests synthetic financial transaction events in real time, validates them against a strict data contract, deduplicates across batches, and publishes three incremental metrics to Delta tables every 30 seconds.
 
 Built as a portfolio project to demonstrate real streaming engineering judgment — not tutorial work.
 
@@ -8,7 +8,7 @@ Built as a portfolio project to demonstrate real streaming engineering judgment 
 
 ## What This Is
 
-A end-to-end streaming data product that does exactly three things well:
+An end-to-end streaming data product that does exactly three things well:
 
 - Ingests transaction events from Azure Event Hubs continuously
 - Enforces a data contract on every event before it touches any metric
@@ -19,139 +19,217 @@ The scope is intentionally narrow. The depth is intentionally real.
 ---
 
 ## Architecture
+![Architecture](docs/architecture.png)
 
-![Architecture](docs/pipeline_workflow.png)
+Pipeline flow:
+
+Event Generator / Source  
+→ Azure Event Hubs ingestion  
+→ Synapse Spark Structured Streaming job  
+→ JSON event parsing  
+→ Contract validation and rejection rules  
+→ Event-time watermarking and deduplication  
+→ Streaming metric computation  
+→ Delta Lake publication in ADLS  
+→ Checkpoint-backed restart recovery  
+→ Evidence notebook inspection
+
+![Pipeline Workflow](docs/pipeline_workflow.png)
 ---
+
 ## Quick Proof of Correctness
 
 This system guarantees correctness through deterministic processing, contract enforcement, and idempotent state updates.
 
-**Core Proof Points:**
+**Core Proof Points**
 
 - **Contract-first validation:** All incoming events are validated against schema and domain rules (R010–R120). Invalid events are rejected before processing.
 - **Deterministic streaming:** Micro-batch execution with checkpointing ensures consistent state recovery and replay safety.
 - **Duplicate protection:** Watermark-based deduplication prevents double counting from late or repeated events.
 - **Idempotent metrics:** Delta Lake MERGE operations ensure aggregates update safely without overwrite risks.
-- **Auditability:** Run logs and evidence notebooks allow independent verification of processing outcomes.
+- **Auditability:** Evidence notebooks allow independent verification of processing outcomes.
 
-This project includes a dedicated **Evidence Notebook** demonstrating validation results, metric consistency checks, and run-level audit proof.
+The project includes a dedicated **Evidence Notebook** demonstrating validation results, metric consistency checks, and run-level audit proof.
 
 ---
 
-## What Is Implemented
+# What Is Implemented
 
-### Contract Validation
+## Contract Validation
 
 Every event is validated before it reaches any metric. Invalid events are silently filtered — they never touch the output tables.
 
 Validation rules enforced:
 
 | Rule | Check |
-|------|-------|
+|-----|------|
 | R010 – R080 | Null check on all 8 required fields |
 | R090 | `event_type` must be `deposit_completed` or `withdrawal_completed` |
 | R100 | `channel` must be `web`, `mobile`, or `api` |
 | R110 | `currency` must be `GBP` |
 | R120 | `amount` must be greater than zero |
 
-Stable rule IDs mean failures are traceable and consistent across versions.
+Stable rule IDs make failures traceable and consistent across versions.
 
 ---
 
-### Watermark-Based Deduplication
+## Watermark-Based Deduplication
 
-Event Hubs delivers at-least-once. The same `event_id` can arrive in a later batch. A simple `dropDuplicates()` within a single batch does not solve this.
+Event Hubs delivers **at-least-once**. The same `event_id` can arrive in later batches. A simple `dropDuplicates()` within a single batch does not solve this.
 
-This pipeline uses Spark's native watermark state store:
+This pipeline uses Spark's watermark state store:
 
 ```python
-valid_stream
-    .withWatermark("event_time", "1 day")
+valid_stream \
+    .withWatermark("event_time", "1 day") \
     .dropDuplicates(["event_id"])
 ```
 
-Spark tracks seen `event_id` values across batches within the watermark horizon and drops anything already processed. The state is bounded — after the horizon passes, old IDs are evicted automatically. No custom dedup table to maintain or clean up.
+Spark tracks seen `event_id` values across batches within the watermark horizon and drops anything already processed.  
+The state is bounded — once the watermark horizon passes, Spark evicts old IDs automatically.
 
 ---
 
-### Published Metrics
+# Published Metrics
 
-#### M1 — Net Flow `metrics/net_flow/`
+## M1 — Net Flow  
+`metrics/net_flow/`
 
-Global cumulative deposit and withdrawal totals. Single row, updated every batch via **Delta MERGE on a constant key**. This means the update is fully atomic — no read-then-overwrite, no race condition under retry.
-
-```
-total_deposits | total_withdrawals | net_flow | deposit_count
-withdrawal_count | avg_deposit | avg_withdrawal
-deposit_to_withdrawal_ratio | updated_at
-```
-
-#### M2 — User Metrics `metrics/user_metrics/`
-
-Per-user running totals. One row per `user_id`, upserted via Delta MERGE. New users are inserted; existing users have their totals accumulated. `first_seen` is preserved on match and never overwritten.
+Global cumulative totals for deposits and withdrawals.
 
 ```
-user_id | total_deposits | total_withdrawals
-deposit_count | withdrawal_count | first_seen | last_seen | updated_at
+total_deposits
+total_withdrawals
+net_flow
+deposit_count
+withdrawal_count
+avg_deposit
+avg_withdrawal
+deposit_to_withdrawal_ratio
+updated_at
 ```
 
-#### M3 — Channel Distribution `metrics/channel_distribution/`
-
-Running event counts and amounts grouped by `(channel, event_type)`. Six possible rows maximum (3 channels × 2 event types), upserted via Delta MERGE.
-
-```
-channel | event_type | event_count | total_amount | updated_at
-```
+Updated via **Delta MERGE on a constant key**, ensuring atomic updates and safe retries.
 
 ---
 
-### Checkpoint Recovery
+## M2 — User Metrics  
+`metrics/user_metrics/`
 
-All stream state is persisted to ADLS:
+Per-user running totals.
 
-- Event Hub offsets — so no events are re-read on restart
-- Watermark and dedup state — so cross-batch deduplication survives failures
+```
+user_id
+total_deposits
+total_withdrawals
+deposit_count
+withdrawal_count
+first_seen
+last_seen
+updated_at
+```
+
+Upserted using **Delta MERGE**. New users are inserted, existing users accumulate totals.
+
+---
+
+## M3 — Channel Distribution  
+`metrics/channel_distribution/`
+
+Running counts grouped by `(channel, event_type)`.
+
+```
+channel
+event_type
+event_count
+total_amount
+updated_at
+```
+
+Maximum of six rows (3 channels × 2 event types).
+
+---
+
+# Checkpoint Recovery
+
+All streaming state is persisted to ADLS.
+
+Checkpoint includes:
+
+- Event Hub offsets
+- Watermark and deduplication state
 - Batch metadata
 
-On failure, the stream restarts from the last committed checkpoint. At most one micro-batch is replayed. Delta MERGE idempotency ensures replayed batches do not corrupt metric totals.
+If the stream fails, Spark resumes from the last checkpoint.
+
+At most **one micro-batch may replay**, but Delta MERGE guarantees the metrics remain correct.
 
 ---
 
-## Project Structure
+# Project Structure
 
 ```
 src/
 ├── contracts/
-│   ├── input_contract.py     # Schema definition + validation rules (R010–R120)
-│   └── output_contract.py    # Delta table schemas for all 3 metrics
+│   ├── input_contract.py
+│   └── output_contract.py
+│
 └── streaming/
-    ├── stream_processor.py   # Entry point, dedup, foreachBatch writes
-    └── aggregations.py       # compute_net_flow, compute_user_metrics, compute_channel_distribution
+    ├── stream_processor.py
+    └── aggregations.py
 ```
 
 ---
 
-## Design Decisions
+# Design Decisions
 
-### Why micro-batching and not continuous streaming
+## Why Micro-Batching Instead of Continuous Streaming
 
-Micro-batching (30-second trigger) gives atomic Delta commits per batch. Each batch either fully succeeds or fully fails — no partial metric updates. Continuous streaming makes this harder to reason about and harder to debug. For a financial metric pipeline where correctness matters more than sub-second latency, micro-batching is the right trade-off.
+Micro-batching (30 second trigger) gives atomic commits per batch.
 
-### Why watermark dedup and not a custom seen-events table
+Each batch either:
 
-An alternative approach is to maintain a Delta table of every processed `event_id` and do a left-anti join each batch. This works but creates an ever-growing table with no natural cleanup mechanism. Watermark-based dedup uses Spark's built-in state store, bounds the state automatically by time horizon, and requires no infrastructure beyond the checkpoint. Less to build, less to maintain, same guarantee.
+- fully succeeds  
+or  
+- fully fails
 
-### Why Delta MERGE for all three metrics
+Continuous streaming is harder to debug and reason about for financial metric pipelines.
 
-All three metrics use Delta MERGE instead of overwrite. This is deliberate. Overwrite is simple but not ACID-safe under concurrent retries — two overlapping batch retries can both read the same old value and produce a wrong cumulative total. MERGE is atomic at the row level. The state is always consistent regardless of how many times a batch retries.
-
-### Why three metrics and not more
-
-M1 demonstrates a single-row ACID merge. M2 demonstrates per-entity upserts. M3 demonstrates multi-grain aggregation. Together they cover the core patterns of stateful streaming. Adding more metrics without a new requirement would be scope creep, not depth.
+Correctness matters more than sub-second latency.
 
 ---
 
-## Generator Characteristics
+## Why Watermark Dedup Instead of a Seen-Events Table
+
+Alternative approach:
+
+Maintain a Delta table of processed `event_id` values.
+
+Problems:
+
+- table grows forever
+- requires cleanup jobs
+- extra infrastructure
+
+Watermark dedup uses Spark's built-in state store and automatically bounds memory usage.
+
+---
+
+## Why Delta MERGE for Metrics
+
+Overwrite approaches risk corruption under retries.
+
+Example failure scenario:
+
+Two retries read the same old value and both update totals.
+
+Delta MERGE guarantees **atomic row updates**.
+
+State remains consistent regardless of retry count.
+
+---
+
+# Generator Characteristics
 
 The synthetic event generator produces:
 
@@ -162,22 +240,23 @@ The synthetic event generator produces:
 - Amount range: £5 – £500
 - Event types: `deposit_completed`, `withdrawal_completed`
 
-This is controlled simulation data used to validate the streaming patterns — not real transaction data.
+This controlled simulation allows the pipeline to demonstrate realistic streaming behavior.
 
 ---
 
-## How to Run (Azure Synapse)
+# How to Run (Azure Synapse)
 
-### Prerequisites
+## Prerequisites
 
-- Azure Event Hubs namespace with a hub named `transactions`
-- Azure Data Lake Storage Gen2 container named `data`
-- Synapse Spark pool attached to the workspace
-- Event Hub connection string stored in Azure Key Vault (never hardcoded)
+- Azure Event Hubs namespace
+- Event hub named `transactions`
+- Azure Data Lake Storage Gen2 container `data`
+- Azure Synapse Spark pool
+- Event Hub connection string stored in Azure Key Vault
 
-### Steps
+---
 
-**1. Set up the event generator (run locally)**
+## 1. Start Event Generator (Local)
 
 Install dependencies:
 
@@ -185,56 +264,47 @@ Install dependencies:
 pip install azure-eventhub python-dotenv
 ```
 
-Create a `.env` file in the generator directory:
+Create `.env`
 
 ```
-EVENT_HUB_CONNECTION_STRING=Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=...
+EVENT_HUB_CONNECTION_STRING=Endpoint=sb://<namespace>.servicebus.windows.net/...
 EVENT_HUB_NAME=transactions
 ```
 
-Run the generator:
+Run generator:
 
 ```bash
-python generator.py
+python produce_events.py
 ```
 
-Or override defaults via arguments:
-
-```bash
-python generator.py --eps 100 --num-users 500
-```
-
-The generator will emit ~100 events/second and print progress every 100 events:
-
-```
-Starting event generation at 100 events/sec...
-Events sent: 100 | Actual rate: 99.8 eps
-Events sent: 200 | Actual rate: 100.1 eps
-```
-
-Stop it at any time with `Ctrl+C`. It will print a final summary before exiting.
-
-> **Note:** Start the generator before running the Synapse stream so events are already queuing in Event Hubs when the first micro-batch fires.
+The generator emits ~100 events per second.
 
 ---
 
-**2. Upload the code package to ADLS**
+## 2. Upload Deployment Bundle to ADLS
+
+Upload the code bundle:
 
 ```
 abfss://data@<storage_account>.dfs.core.windows.net/code/azure_stream_code.zip
 ```
 
-**2. Open a Synapse notebook attached to your Spark pool**
+---
 
-**3. In the first cell, install the package and start the stream**
+## 3. Run Stream in Synapse Notebook
+
+Open a Synapse notebook attached to a Spark pool and run:
 
 ```python
-# Download zip from ADLS and attach to Spark context
+from notebookutils import mssparkutils
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
 spark.sparkContext.addPyFile(
     "abfss://data@<storage_account>.dfs.core.windows.net/code/azure_stream_code.zip"
 )
 
-# Retrieve connection string from Key Vault (never pass plaintext)
 connection_string = mssparkutils.credentials.getSecret("<keyvault_name>", "<secret_name>")
 
 from src.streaming.stream_processor import run_stream
@@ -251,41 +321,87 @@ run_stream(
 )
 ```
 
-**4. Let the stream run for at least one micro-batch (30 seconds)**
+---
 
-### Output Locations
+## Output Locations
 
 ```
 abfss://data@<storage_account>.dfs.core.windows.net/
-├── stream/
-│   └── metrics/
-│       ├── net_flow/
-│       ├── user_metrics/
-│       └── channel_distribution/
-├── checkpoints/
-└── stream/curated/               # only if write_curated=True
+
+stream/
+ └── metrics/
+     ├── net_flow/
+     ├── user_metrics/
+     └── channel_distribution/
+
+checkpoints/
 ```
-
-### Stopping the Stream
-
-Interrupt the notebook execution. The checkpoint is already committed — restarting the notebook resumes safely from the last completed batch with no data loss or duplication.
-
-### Validating Outputs
-
-Use the included Evidence Notebook to verify:
-
-- Metric invariants (e.g. `net_flow = total_deposits - total_withdrawals`)
-- Cross-table consistency across M1, M2, and M3
-- Checkpoint integrity and batch progression
 
 ---
 
-## What This Project Demonstrates
+## Stopping the Stream
 
-- Azure Event Hubs ingestion with Spark Structured Streaming
-- Data contract enforcement in a streaming context
-- Watermark-based cross-batch deduplication using Spark state store
-- Delta Lake ACID merges for stateful incremental metrics
+Interrupt the notebook execution.
+
+Checkpoint ensures safe restart with no duplication.
+
+---
+
+# Evidence
+
+Execution verification is provided in:
+
+```
+evidence/EvidenceNB.ipynb
+```
+
+The notebook validates:
+
+- metric invariants
+- cross-table consistency
+- streaming state progression
+- checkpoint integrity
+
+---
+
+# Automated Testing
+
+Unit tests validate:
+
+- input contract enforcement
+- aggregation correctness
+- smoke test for metric pipeline
+
+Run locally:
+
+```bash
+pytest -q
+```
+
+CI runs these tests automatically on every commit.
+
+---
+
+# What This Project Demonstrates
+
+- Azure Event Hubs ingestion
+- Spark Structured Streaming engineering
+- Contract-first streaming validation
+- Watermark-based deduplication
+- Delta Lake MERGE-based incremental metrics
 - Checkpoint-based failure recovery
-- Clean separation between contract, aggregation, and processing logic
-- Engineering trade-off reasoning documented alongside the code
+- Clean separation between contracts, aggregations, and execution logic
+- Real streaming engineering trade-off reasoning
+
+---
+
+# Portfolio Context
+
+This repository represents the **Azure Streaming** component of a four-stage data engineering portfolio:
+
+1. Local Batch Pipeline  
+2. Local Streaming Pipeline  
+3. Azure Batch Pipeline  
+4. Azure Streaming Pipeline  
+
+Each project demonstrates progressively more advanced data pipeline architectures while maintaining consistent engineering discipline.
