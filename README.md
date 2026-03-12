@@ -20,38 +20,7 @@ The scope is intentionally narrow. The depth is intentionally real.
 
 ## Architecture
 
-```
-┌─────────────────┐     JSON events      ┌──────────────────┐
-│  Event Generator │ ──────────────────► │  Azure Event Hubs │
-│  ~100 events/sec │                     │                  │
-└─────────────────┘                      └────────┬─────────┘
-                                                  │
-                                                  ▼
-                                    ┌─────────────────────────┐
-                                    │   Spark Structured       │
-                                    │   Streaming              │
-                                    │                          │
-                                    │  1. Parse JSON body      │
-                                    │  2. Contract validation  │
-                                    │  3. Watermark dedup      │
-                                    │  4. foreachBatch writes  │
-                                    └────────────┬────────────┘
-                                                 │
-                          ┌──────────────────────┼──────────────────────┐
-                          ▼                      ▼                      ▼
-               ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-               │  M1: Net Flow   │   │ M2: User Metrics│   │  M3: Channel    │
-               │  Single row     │   │ One row/user    │   │  Distribution   │
-               │  ACID MERGE     │   │  Delta MERGE    │   │  Delta MERGE    │
-               └─────────────────┘   └─────────────────┘   └─────────────────┘
-                                                 │
-                                    ┌────────────▼────────────┐
-                                    │  Checkpoint (ADLS)       │
-                                    │  Event Hub offsets       │
-                                    │  Watermark + dedup state │
-                                    └─────────────────────────┘
-```
-![Architecture](docs/architecture.png)
+![Architecture](docs/pipeline_workflow.png)
 ---
 ## Quick Proof of Correctness
 
