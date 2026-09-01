@@ -1,5 +1,7 @@
 # Azure Event Stream — Real-Time Financial Metrics Pipeline
 
+![CI](https://github.com/D-Atul/azure-stream-data-product/actions/workflows/ci.yml/badge.svg)
+
 A production-grade streaming pipeline built on Azure Event Hubs, Spark Structured Streaming, and Delta Lake. It ingests synthetic financial transaction events in real time, validates them against a strict data contract, deduplicates across batches, and publishes three incremental metrics to Delta tables every 30 seconds.
 
 Built as a portfolio project to demonstrate real streaming engineering judgment — not tutorial work.
